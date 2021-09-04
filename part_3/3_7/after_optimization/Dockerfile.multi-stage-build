@@ -1,0 +1,61 @@
+# We need ruby 3.0.0. From docker hub
+FROM ruby:3.0.0-alpine3.13 AS base
+
+# Install dependencies  
+RUN apk add --no-cache sqlite-dev \
+    sqlite-libs \
+    nodejs \
+    yarn 
+
+# Use a previous base stage as a new stage for installing project dependencies
+FROM base AS dependencies
+
+# Use /usr/src/app as our workdir. The following instructions will be executed in this location.
+WORKDIR /usr/src/app
+
+# Copy Gemfile Gemfile.lock to to /usr/src/app/
+COPY Gemfile Gemfile.lock ./
+
+# Install dependencies 
+RUN apk add --no-cache build-base && \
+    gem install bundler:2.2.11 && \
+    bundle config without test && \
+    bundle install && \
+    apk del build-base && \
+    find /usr/local/bundle -name tmp -type d -exec rm -rf {} + && \
+    find /usr/local/bundle -name "*.gem" -type f -exec rm -rf {} +
+
+# Copy the all the contents from this location (.) to /usr/src/app/ creating /usr/src/app/<all_contents_from_repo>
+COPY . .
+
+# Run migrations and precompile
+RUN rails db:migrate RAILS_ENV=production && \
+    rake assets:precompile  
+
+# Use a base stage as a new stage for running the app
+FROM base
+
+# Exposing a container port means that we tell Docker that the container listens to a certain port
+# This doesn’t actually do much except helps us humans with the configuration.
+EXPOSE 3000
+
+# Use /usr/src/app as our workdir. The following instructions will be executed in this location.
+WORKDIR /usr/src/app
+
+# Copies just the built artifact from the previous stage dependencies into the  current new stage. 
+COPY --from=dependencies /usr/local/bundle /usr/local/bundle
+COPY --from=dependencies /usr/src/app/app /usr/src/app/app
+COPY --from=dependencies /usr/src/app/bin /usr/src/app/bin
+COPY --from=dependencies /usr/src/app/config /usr/src/app/config
+COPY --from=dependencies /usr/src/app/db /usr/src/app/db
+COPY --from=dependencies /usr/src/app/public /usr/src/app/public
+COPY --from=dependencies /usr/src/app/Gemfile /usr/src/app/Gemfile 
+COPY --from=dependencies /usr/src/app/Gemfile.lock /usr/src/app/Gemfile.lock
+COPY --from=dependencies /usr/src/app/config.ru /usr/src/app/config.ru
+
+# Creates a non-root user
+RUN adduser -D appuser && \
+    chown -R appuser /usr/src/app 
+
+# And finally the command to run the application
+CMD ["rails", "s", "-e", "production"]
